@@ -1,12 +1,16 @@
-# Локальное окружение для разработки: пока только PostgreSQL.
-# Запуск:      docker compose up -d
-# Статус:      docker compose ps            (ждём "healthy")
-# Консоль БД:  docker compose exec postgres psql -U moex -d moex
+# Локальное окружение: PostgreSQL + сам сервис.
+#
+# Всё сразу:      docker compose up -d --build   (сервис на http://localhost:8080)
+# Логи сервиса:   docker compose logs -f app
+# Только база:    docker compose up -d postgres  (а сервис — через `go run ./cmd/server`)
+# Статус:         docker compose ps
+# Консоль БД:     docker compose exec postgres psql -U moex -d moex
+# Остановить:     docker compose down            (данные сохранятся)
 # Снести всё вместе с данными: docker compose down -v
 #
-# Java-параллель: то же, что поднимать БД для Spring Boot через compose
-# (или spring-boot-docker-compose). Сам Go-сервис пока запускаем с хоста
-# через `go run ./cmd/server` — так быстрее цикл правка → запуск.
+# Java-параллель: то же, что поднимать Spring Boot-приложение и БД одним
+# compose-файлом. Для разработки удобнее держать в Docker только базу,
+# а сервис запускать с хоста — перезапуск за секунду без пересборки образа.
 
 services:
   postgres:
@@ -26,11 +30,29 @@ services:
       - pgdata:/var/lib/postgresql
     healthcheck:
       # pg_isready отвечает "готов", только когда БД реально принимает соединения.
-      # Пригодится для depends_on: condition: service_healthy.
+      # На него опирается depends_on сервиса app (condition: service_healthy).
       test: ["CMD-SHELL", "pg_isready -U moex -d moex"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  app:
+    # Образ собирается из Dockerfile в корне проекта.
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Внутри сети compose база доступна по имени сервиса "postgres",
+      # а не по localhost: localhost внутри контейнера — это сам контейнер.
+      DATABASE_URL: postgres://moex:moex@postgres:5432/moex?sslmode=disable
+    depends_on:
+      postgres:
+        # Ждать не просто запуска контейнера, а успешного healthcheck:
+        # иначе сервис стартует раньше, чем БД начнёт принимать соединения,
+        # и упадёт на ping при старте.
+        condition: service_healthy
+    # Если сервис упал (например, база временно недоступна) — перезапустить.
+    restart: unless-stopped
 
 volumes:
   # Именованный том: данные переживают `docker compose down`,
