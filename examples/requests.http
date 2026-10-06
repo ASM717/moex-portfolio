@@ -1,0 +1,117 @@
+# Запросы к moex-portfolio для HTTP-клиента GoLand / IntelliJ IDEA
+# (аналог Postman прямо в IDE). Каждый запрос отделён строкой "###";
+# запускается кнопкой ▶ слева от него.
+#
+# Перед запуском: docker compose up -d && go run ./cmd/server
+#
+# Запросы идут по порядку как сценарий: "Создать портфель" сохраняет id
+# нового портфеля в переменную portfolioId, остальные её используют.
+
+@host = http://localhost:8080
+
+### Health check: сервис жив и база доступна
+GET {{host}}/healthz
+
+### Создать портфель — id сохраняется в {{portfolioId}}
+POST {{host}}/portfolios
+Content-Type: application/json
+
+{
+  "name": "Долгосрочный"
+}
+
+> {%
+    client.test("portfolio created", () => {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.global.set("portfolioId", response.body.id);
+%}
+
+### Список портфелей
+GET {{host}}/portfolios
+
+### Добавить позицию SBER (тикер можно в любом регистре)
+PUT {{host}}/portfolios/{{portfolioId}}/positions/sber
+Content-Type: application/json
+
+{
+  "quantity": 10,
+  "avg_price": "250.50"
+}
+
+### Добавить позицию GAZP (цена числом тоже принимается)
+PUT {{host}}/portfolios/{{portfolioId}}/positions/GAZP
+Content-Type: application/json
+
+{
+  "quantity": 100,
+  "avg_price": 130
+}
+
+### Добавить облигацию — её нет на TQBR, попадёт в summary.unpriced
+PUT {{host}}/portfolios/{{portfolioId}}/positions/SU26238RMFS4
+Content-Type: application/json
+
+{
+  "quantity": 3,
+  "avg_price": "700"
+}
+
+### Портфель с текущей стоимостью и доходностью
+GET {{host}}/portfolios/{{portfolioId}}
+
+### Изменить позицию: PUT заменяет количество и цену целиком
+PUT {{host}}/portfolios/{{portfolioId}}/positions/SBER
+Content-Type: application/json
+
+{
+  "quantity": 20,
+  "avg_price": "265"
+}
+
+### Удалить позицию — 204 No Content
+DELETE {{host}}/portfolios/{{portfolioId}}/positions/GAZP
+
+### --- Ошибки ---
+
+### 400: опечатка в поле (неизвестные поля запрещены)
+POST {{host}}/portfolios
+Content-Type: application/json
+
+{
+  "nmae": "Опечатка"
+}
+
+### 400: пустое имя
+POST {{host}}/portfolios
+Content-Type: application/json
+
+{
+  "name": "   "
+}
+
+### 400: не передана цена
+PUT {{host}}/portfolios/{{portfolioId}}/positions/SBER
+Content-Type: application/json
+
+{
+  "quantity": 10
+}
+
+### 400: недопустимый тикер
+PUT {{host}}/portfolios/{{portfolioId}}/positions/SB-ER
+Content-Type: application/json
+
+{
+  "quantity": 10,
+  "avg_price": "1"
+}
+
+### 404: портфеля нет
+GET {{host}}/portfolios/999999
+
+### 400: id не число
+GET {{host}}/portfolios/abc
+
+### 405: метод не поддерживается
+DELETE {{host}}/portfolios
