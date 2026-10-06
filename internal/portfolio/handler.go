@@ -89,12 +89,44 @@ type positionResponse struct {
 	UpdatedAt time.Time       `json:"updated_at"`
 }
 
+// valuationResponse — оценка позиции. Суммы в рублях округляются до копеек
+// при выводе; внутри расчёт ведётся точно, без округлений.
+type valuationResponse struct {
+	CurrentPrice decimal.Decimal  `json:"current_price"`
+	Cost         decimal.Decimal  `json:"cost"`
+	MarketValue  decimal.Decimal  `json:"market_value"`
+	PnL          decimal.Decimal  `json:"pnl"`
+	PnLPercent   *decimal.Decimal `json:"pnl_percent"` // nil → null
+}
+
+// positionDetailsResponse — позиция с оценкой. Встраивание positionResponse
+// поднимает его поля на верхний уровень JSON-объекта позиции.
+type positionDetailsResponse struct {
+	positionResponse
+	// Указатель на структуру: nil сериализуется в "valuation": null —
+	// клиент явно видит, что оценки нет (а не нулевые суммы).
+	Valuation *valuationResponse `json:"valuation"`
+}
+
+type summaryResponse struct {
+	Cost        decimal.Decimal  `json:"cost"`
+	MarketValue decimal.Decimal  `json:"market_value"`
+	PnL         decimal.Decimal  `json:"pnl"`
+	PnLPercent  *decimal.Decimal `json:"pnl_percent"`
+	// *time.Time, чтобы при отсутствии времени отдать null, а не
+	// "0001-01-01T00:00:00Z" — так сериализуется нулевой time.Time.
+	PricedAt *time.Time `json:"priced_at"`
+	Unpriced []string   `json:"unpriced"`
+}
+
 // portfolioDetailsResponse встраивает portfolioResponse: encoding/json
 // "поднимает" поля встроенной структуры на верхний уровень, поэтому
-// в JSON будет плоский объект {id, name, created_at, positions}.
+// в JSON будет плоский объект {id, name, created_at, positions, summary}.
 type portfolioDetailsResponse struct {
 	portfolioResponse
-	Positions []positionResponse `json:"positions"`
+	Positions []positionDetailsResponse `json:"positions"`
+	// nil, если котировки недоступны.
+	Summary *summaryResponse `json:"summary"`
 }
 
 type errorResponse struct {
@@ -147,14 +179,7 @@ func (h *Handler) getPortfolio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := portfolioDetailsResponse{
-		portfolioResponse: toPortfolioResponse(d.Portfolio),
-		Positions:         make([]positionResponse, 0, len(d.Positions)),
-	}
-	for _, pos := range d.Positions {
-		resp.Positions = append(resp.Positions, toPositionResponse(pos))
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, toDetailsResponse(d))
 }
 
 func (h *Handler) setPosition(w http.ResponseWriter, r *http.Request) {
@@ -289,4 +314,44 @@ func toPositionResponse(p Position) positionResponse {
 		AvgPrice:  p.AvgPrice,
 		UpdatedAt: p.UpdatedAt,
 	}
+}
+
+// moneyPlaces — до скольких знаков округляем суммы в рублях при выводе.
+const moneyPlaces = 2
+
+func toDetailsResponse(d Details) portfolioDetailsResponse {
+	resp := portfolioDetailsResponse{
+		portfolioResponse: toPortfolioResponse(d.Portfolio),
+		Positions:         make([]positionDetailsResponse, 0, len(d.Positions)),
+	}
+	for _, pos := range d.Positions {
+		item := positionDetailsResponse{positionResponse: toPositionResponse(pos.Position)}
+		if v := pos.Valuation; v != nil { // if с инициализатором: v виден только внутри if
+			item.Valuation = &valuationResponse{
+				CurrentPrice: v.Price,
+				Cost:         v.Cost.Round(moneyPlaces),
+				MarketValue:  v.Value.Round(moneyPlaces),
+				PnL:          v.PnL.Round(moneyPlaces),
+				PnLPercent:   v.PnLPercent,
+			}
+		}
+		resp.Positions = append(resp.Positions, item)
+	}
+
+	if s := d.Summary; s != nil {
+		resp.Summary = &summaryResponse{
+			Cost:        s.Cost.Round(moneyPlaces),
+			MarketValue: s.Value.Round(moneyPlaces),
+			PnL:         s.PnL.Round(moneyPlaces),
+			PnLPercent:  s.PnLPercent,
+			Unpriced:    s.Unpriced,
+		}
+		if !s.PricedAt.IsZero() {
+			// Копия в локальную переменную, чтобы взять адрес именно её,
+			// а не поля доменной структуры.
+			t := s.PricedAt
+			resp.Summary.PricedAt = &t
+		}
+	}
+	return resp
 }

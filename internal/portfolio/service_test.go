@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/ASM717/moex-portfolio/internal/moex"
 )
 
 // fakeRepo — ручной фейк вместо мока. Встраивает интерфейс repository:
@@ -27,6 +29,15 @@ type fakeRepo struct {
 	createdName string
 	upserted    Position
 	deleted     string
+	positions   []Position
+}
+
+func (f *fakeRepo) GetPortfolio(_ context.Context, id int64) (Portfolio, error) {
+	return Portfolio{ID: id, Name: "test"}, nil
+}
+
+func (f *fakeRepo) ListPositions(_ context.Context, _ int64) ([]Position, error) {
+	return f.positions, nil
 }
 
 func (f *fakeRepo) CreatePortfolio(_ context.Context, name string) (Portfolio, error) {
@@ -68,7 +79,7 @@ func TestServiceCreatePortfolio(t *testing.T) {
 		// go test -run 'TestServiceCreatePortfolio/trims' ./internal/portfolio
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &fakeRepo{}
-			svc := NewService(repo)
+			svc := NewService(repo, nil) // котировки в этом тесте не нужны: nil-интерфейс
 
 			p, err := svc.CreatePortfolio(context.Background(), tt.input)
 
@@ -111,7 +122,7 @@ func TestServiceSetPosition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &fakeRepo{}
-			svc := NewService(repo)
+			svc := NewService(repo, nil) // котировки в этом тесте не нужны: nil-интерфейс
 
 			_, err := svc.SetPosition(context.Background(), 1, tt.input)
 
@@ -134,7 +145,7 @@ func TestServiceSetPosition(t *testing.T) {
 
 func TestServiceDeletePositionNormalizesTicker(t *testing.T) {
 	repo := &fakeRepo{}
-	svc := NewService(repo)
+	svc := NewService(repo, nil) // котировки в этом тесте не нужны: nil-интерфейс
 
 	if err := svc.DeletePosition(context.Background(), 1, "gazp"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -155,4 +166,74 @@ func assertValidationError(t *testing.T, err error, wantField string) {
 	if vErr.Field != wantField {
 		t.Errorf("validation field = %q, want %q", vErr.Field, wantField)
 	}
+}
+
+// fakeQuoter отдаёт заранее заданные котировки или ошибку и запоминает,
+// сколько раз его вызвали.
+type fakeQuoter struct {
+	quotes map[string]moex.Quote
+	err    error
+	calls  int
+}
+
+func (f *fakeQuoter) Quotes(_ context.Context, _ []string) (map[string]moex.Quote, error) {
+	f.calls++
+	return f.quotes, f.err
+}
+
+func TestServiceGetPortfolio(t *testing.T) {
+	sber := Position{Ticker: "SBER", Quantity: 10, AvgPrice: decimal.RequireFromString("250")}
+
+	t.Run("valued", func(t *testing.T) {
+		repo := &fakeRepo{positions: []Position{sber}}
+		quotes := &fakeQuoter{quotes: map[string]moex.Quote{
+			"SBER": {Ticker: "SBER", Price: decimal.RequireFromString("300")},
+		}}
+
+		d, err := NewService(repo, quotes).GetPortfolio(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d.Summary == nil {
+			t.Fatal("summary is nil, want valuation")
+		}
+		if want := decimal.RequireFromString("3000"); !d.Summary.Value.Equal(want) {
+			t.Errorf("summary value = %s, want %s", d.Summary.Value, want)
+		}
+		if d.Positions[0].Valuation == nil {
+			t.Error("position valuation is nil")
+		}
+	})
+
+	t.Run("quotes unavailable", func(t *testing.T) {
+		repo := &fakeRepo{positions: []Position{sber}}
+		quotes := &fakeQuoter{err: errors.New("iss is down")}
+
+		d, err := NewService(repo, quotes).GetPortfolio(context.Background(), 1)
+		// Ошибка ISS не должна превращаться в ошибку запроса.
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d.Summary != nil {
+			t.Errorf("summary = %+v, want nil", d.Summary)
+		}
+		if len(d.Positions) != 1 || d.Positions[0].Valuation != nil {
+			t.Errorf("positions = %+v, want one position without valuation", d.Positions)
+		}
+	})
+
+	t.Run("empty portfolio skips ISS", func(t *testing.T) {
+		quotes := &fakeQuoter{}
+
+		d, err := NewService(&fakeRepo{}, quotes).GetPortfolio(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if quotes.calls != 0 {
+			t.Errorf("ISS called %d times, want 0", quotes.calls)
+		}
+		if d.Summary == nil || !d.Summary.Value.IsZero() {
+			t.Errorf("summary = %+v, want zero valuation", d.Summary)
+		}
+	})
 }

@@ -26,6 +26,7 @@ import (
 	// Импорты своего модуля — по полному пути модуля из go.mod.
 	// Относительных импортов ("../internal/config") в Go нет.
 	"github.com/ASM717/moex-portfolio/internal/config"
+	"github.com/ASM717/moex-portfolio/internal/moex"
 	"github.com/ASM717/moex-portfolio/internal/portfolio"
 	"github.com/ASM717/moex-portfolio/internal/postgres"
 	"github.com/ASM717/moex-portfolio/migrations"
@@ -98,8 +99,9 @@ func run() error {
 	// Ручная "сборка бинов": repository → service → handler.
 	// Каждый слой получает зависимость через конструктор; *Repository и
 	// *Service подходят под интерфейсы, объявленные в слое выше, неявно.
+	moexClient := moex.New(moex.WithBaseURL(cfg.ISSBaseURL))
 	portfolioRepo := portfolio.NewRepository(pool)
-	portfolioSvc := portfolio.NewService(portfolioRepo)
+	portfolioSvc := portfolio.NewService(portfolioRepo, moexClient)
 	portfolio.NewHandler(portfolioSvc).Register(mux)
 
 	// http.Server создаём явно, а не через http.ListenAndServe(addr, mux):

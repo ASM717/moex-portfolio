@@ -8,6 +8,8 @@ package config
 
 import (
 	"os"
+
+	"github.com/ASM717/moex-portfolio/internal/moex"
 )
 
 // Config — все настройки сервиса в одном месте.
@@ -21,6 +23,9 @@ type Config struct {
 	// DatabaseURL — строка подключения к PostgreSQL в формате URL,
 	// например postgres://user:pass@host:5432/db?sslmode=disable.
 	DatabaseURL string
+	// ISSBaseURL — корень ISS API Мосбиржи. Переопределяется, например,
+	// чтобы направить сервис на заглушку при ручном тестировании.
+	ISSBaseURL string
 }
 
 // Load собирает Config из окружения.
@@ -36,6 +41,7 @@ func Load() Config {
 	return Config{
 		HTTPAddr:    getEnv("HTTP_ADDR", ":8080"),
 		DatabaseURL: getEnv("DATABASE_URL", "postgres://moex:moex@localhost:5432/moex?sslmode=disable"),
+		ISSBaseURL:  getEnv("ISS_BASE_URL", moex.DefaultBaseURL),
 	}
 }
 

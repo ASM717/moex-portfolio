@@ -3,12 +3,21 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
+
+	"github.com/ASM717/moex-portfolio/internal/moex"
 )
 
 const maxNameLength = 100
+
+// quotesTimeout — сколько ждём ISS при просмотре портфеля. Меньше общего
+// таймаута клиента: лучше быстро отдать портфель без оценки, чем держать
+// пользователя 10 секунд.
+const quotesTimeout = 3 * time.Second
 
 // tickerPattern — допустимый формат тикера (SECID в ISS): латиница в верхнем
 // регистре и цифры, например SBER, GAZP, SU26238RMFS4.
@@ -35,17 +44,22 @@ type repository interface {
 	DeletePosition(ctx context.Context, portfolioID int64, ticker string) error
 }
 
-// Service — бизнес-логика портфелей: валидация и нормализация входных
-// данных, сборка ответов из нескольких запросов к хранилищу.
-// Позже здесь появится расчёт стоимости и доходности по котировкам.
-type Service struct {
-	repo repository
+// quoter — источник текущих котировок. Сейчас это *moex.Client, в тестах — фейк.
+type quoter interface {
+	Quotes(ctx context.Context, tickers []string) (map[string]moex.Quote, error)
 }
 
-// NewService создаёт сервис. Зависимость передаётся явно через параметр —
+// Service — бизнес-логика портфелей: валидация и нормализация входных
+// данных, сборка ответов из хранилища и оценка по текущим котировкам.
+type Service struct {
+	repo   repository
+	quotes quoter
+}
+
+// NewService создаёт сервис. Зависимости передаются явно через параметры —
 // это и есть constructor injection, только без контейнера.
-func NewService(repo repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo repository, quotes quoter) *Service {
+	return &Service{repo: repo, quotes: quotes}
 }
 
 // CreatePortfolio проверяет имя и создаёт портфель.
@@ -62,7 +76,12 @@ func (s *Service) ListPortfolios(ctx context.Context) ([]Portfolio, error) {
 	return s.repo.ListPortfolios(ctx)
 }
 
-// GetPortfolio возвращает портфель вместе с позициями.
+// GetPortfolio возвращает портфель вместе с позициями и их оценкой
+// по текущим котировкам.
+//
+// Недоступность ISS — не ошибка запроса: портфель отдаётся без оценки
+// (Summary == nil, у позиций Valuation == nil), а проблема пишется в лог.
+// Это "graceful degradation": внешний сервис не должен ронять наш API.
 func (s *Service) GetPortfolio(ctx context.Context, id int64) (Details, error) {
 	p, err := s.repo.GetPortfolio(ctx, id)
 	if err != nil {
@@ -78,7 +97,40 @@ func (s *Service) GetPortfolio(ctx context.Context, id int64) (Details, error) {
 	// Два запроса без общей транзакции: между ними состояние может
 	// измениться. Для просмотра портфеля это приемлемо; если понадобится
 	// строгая согласованность — обернём в транзакцию REPEATABLE READ.
-	return Details{Portfolio: p, Positions: positions}, nil
+
+	quotes, err := s.fetchQuotes(ctx, positions)
+	if err != nil {
+		slog.WarnContext(ctx, "quotes unavailable, returning portfolio without valuation",
+			"portfolio_id", id, "err", err)
+
+		details := make([]PositionDetails, 0, len(positions))
+		for _, pos := range positions {
+			details = append(details, PositionDetails{Position: pos})
+		}
+		return Details{Portfolio: p, Positions: details}, nil
+	}
+
+	details, summary := valuate(positions, quotes)
+	return Details{Portfolio: p, Positions: details, Summary: &summary}, nil
+}
+
+// fetchQuotes запрашивает котировки для тикеров позиций с коротким таймаутом.
+func (s *Service) fetchQuotes(ctx context.Context, positions []Position) (map[string]moex.Quote, error) {
+	if len(positions) == 0 {
+		return map[string]moex.Quote{}, nil
+	}
+
+	tickers := make([]string, 0, len(positions))
+	for _, pos := range positions {
+		tickers = append(tickers, pos.Ticker)
+	}
+
+	// Дочерний контекст с таймаутом: отменится либо по таймауту, либо
+	// вместе с родительским (если клиент нашего API ушёл).
+	ctx, cancel := context.WithTimeout(ctx, quotesTimeout)
+	defer cancel()
+
+	return s.quotes.Quotes(ctx, tickers)
 }
 
 // SetPosition создаёт или заменяет позицию в портфеле.

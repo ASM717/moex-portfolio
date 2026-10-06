@@ -30,7 +30,7 @@ type Position struct {
 	UpdatedAt time.Time
 }
 
-// Details — портфель вместе с позициями.
+// Details — портфель вместе с позициями и их оценкой.
 //
 // Portfolio здесь ВСТРОЕН (embedding): поле без имени. Поля и методы
 // Portfolio становятся доступны напрямую: d.Name вместо d.Portfolio.Name.
@@ -39,7 +39,10 @@ type Position struct {
 // ("composition over inheritance", доведённое до уровня языка).
 type Details struct {
 	Portfolio
-	Positions []Position
+	Positions []PositionDetails
+	// Summary == nil, если котировки получить не удалось (ISS недоступен).
+	// Портфель при этом всё равно отдаётся — без оценки.
+	Summary *Summary
 }
 
 // ErrNotFound — "сторожевая" ошибка (sentinel error): заранее созданное

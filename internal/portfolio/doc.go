@@ -6,6 +6,7 @@
 //	portfolio.go  — доменные типы и ошибки (ErrNotFound, ValidationError)
 //	handler.go    — HTTP-хендлеры и JSON DTO (аналог @RestController)
 //	service.go    — бизнес-логика и валидация (аналог @Service)
+//	valuation.go  — расчёт стоимости и доходности (чистые функции, без I/O)
 //	repository.go — доступ к PostgreSQL поверх sqlc-кода из internal/db
 //
 // Зависимости направлены строго сверху вниз: handler → service → repository.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -130,13 +131,41 @@ func TestCreatePortfolio(t *testing.T) {
 }
 
 func TestGetPortfolio(t *testing.T) {
+	pricedAt := time.Date(2026, 10, 6, 15, 56, 3, 0, time.UTC)
+	pct := decimal.RequireFromString("12.77")
+
 	svc := &fakeService{
 		getPortfolio: func(_ context.Context, id int64) (Details, error) {
+			sber := Position{Ticker: "SBER", Quantity: 10, AvgPrice: decimal.RequireFromString("250.5")}
+			bond := Position{Ticker: "SU26238RMFS4", Quantity: 3, AvgPrice: decimal.RequireFromString("700")}
+
 			switch id {
-			case 1:
+			case 1: // котировки есть, но не для всех бумаг
 				return Details{
 					Portfolio: Portfolio{ID: 1, Name: "Основной"},
-					Positions: []Position{{Ticker: "SBER", Quantity: 10, AvgPrice: decimal.RequireFromString("250.5")}},
+					Positions: []PositionDetails{
+						{Position: sber, Valuation: &Valuation{
+							Price:      decimal.RequireFromString("282.49"),
+							Cost:       decimal.RequireFromString("2505"),
+							Value:      decimal.RequireFromString("2824.9"),
+							PnL:        decimal.RequireFromString("319.9"),
+							PnLPercent: &pct,
+						}},
+						{Position: bond}, // без котировки
+					},
+					Summary: &Summary{
+						Cost:       decimal.RequireFromString("2505"),
+						Value:      decimal.RequireFromString("2824.9"),
+						PnL:        decimal.RequireFromString("319.9"),
+						PnLPercent: &pct,
+						PricedAt:   pricedAt,
+						Unpriced:   []string{"SU26238RMFS4"},
+					},
+				}, nil
+			case 3: // ISS недоступен: портфель без оценки
+				return Details{
+					Portfolio: Portfolio{ID: 3, Name: "Без котировок"},
+					Positions: []PositionDetails{{Position: sber}},
 				}, nil
 			case 500:
 				return Details{}, errors.New("connection reset by peer")
@@ -149,30 +178,51 @@ func TestGetPortfolio(t *testing.T) {
 	}
 	h := newTestServer(svc)
 
-	t.Run("found", func(t *testing.T) {
+	t.Run("with valuation", func(t *testing.T) {
 		rec := do(t, h, http.MethodGet, "/portfolios/1", "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body)
 		}
-		// Проверяем форму JSON через map — так видно реальные ключи и то,
-		// что avg_price сериализован строкой, а встроенная структура — плоско.
-		var resp map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode response: %v", err)
+		// Ожидаемый JSON целиком: видно форму ответа, плоские встроенные
+		// структуры, деньги строками и null там, где оценки нет.
+		assertJSONEqual(t, rec.Body.Bytes(), `{
+			"id": 1, "name": "Основной", "created_at": "0001-01-01T00:00:00Z",
+			"positions": [
+				{
+					"ticker": "SBER", "quantity": 10, "avg_price": "250.5",
+					"updated_at": "0001-01-01T00:00:00Z",
+					"valuation": {
+						"current_price": "282.49", "cost": "2505", "market_value": "2824.9",
+						"pnl": "319.9", "pnl_percent": "12.77"
+					}
+				},
+				{
+					"ticker": "SU26238RMFS4", "quantity": 3, "avg_price": "700",
+					"updated_at": "0001-01-01T00:00:00Z",
+					"valuation": null
+				}
+			],
+			"summary": {
+				"cost": "2505", "market_value": "2824.9", "pnl": "319.9", "pnl_percent": "12.77",
+				"priced_at": "2026-10-06T15:56:03Z",
+				"unpriced": ["SU26238RMFS4"]
+			}
+		}`)
+	})
+
+	t.Run("without quotes", func(t *testing.T) {
+		rec := do(t, h, http.MethodGet, "/portfolios/3", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body)
 		}
-		if resp["name"] != "Основной" {
-			t.Errorf("name = %v, want %q", resp["name"], "Основной")
-		}
-		// Type assertion x.([]any) — приведение типа с проверкой (comma ok),
-		// аналог instanceof + cast. Без ok при несовпадении была бы паника.
-		positions, ok := resp["positions"].([]any)
-		if !ok || len(positions) != 1 {
-			t.Fatalf("positions = %v, want one element", resp["positions"])
-		}
-		pos := positions[0].(map[string]any)
-		if pos["avg_price"] != "250.5" {
-			t.Errorf("avg_price = %#v, want string %q", pos["avg_price"], "250.5")
-		}
+		assertJSONEqual(t, rec.Body.Bytes(), `{
+			"id": 3, "name": "Без котировок", "created_at": "0001-01-01T00:00:00Z",
+			"positions": [{
+				"ticker": "SBER", "quantity": 10, "avg_price": "250.5",
+				"updated_at": "0001-01-01T00:00:00Z", "valuation": null
+			}],
+			"summary": null
+		}`)
 	})
 
 	statusCases := []struct {
@@ -254,5 +304,23 @@ func TestDeletePosition(t *testing.T) {
 	}
 	if rec := do(t, h, http.MethodDelete, "/portfolios/1/positions/GAZP", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("missing: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// assertJSONEqual сравнивает JSON по смыслу, а не побайтно: порядок ключей
+// и пробелы не важны. Оба значения разбираются в any (map/slice/string/
+// float64) и сравниваются через reflect.DeepEqual — аналог
+// JSONAssert.assertEquals(expected, actual, true) в Java.
+func assertJSONEqual(t *testing.T, got []byte, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("decode actual JSON: %v\n%s", err, got)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("decode expected JSON: %v", err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Errorf("JSON mismatch\n got: %s\nwant: %s", got, want)
 	}
 }
