@@ -1,0 +1,38 @@
+# Локальное окружение для разработки: пока только PostgreSQL.
+# Запуск:      docker compose up -d
+# Статус:      docker compose ps            (ждём "healthy")
+# Консоль БД:  docker compose exec postgres psql -U moex -d moex
+# Снести всё вместе с данными: docker compose down -v
+#
+# Java-параллель: то же, что поднимать БД для Spring Boot через compose
+# (или spring-boot-docker-compose). Сам Go-сервис пока запускаем с хоста
+# через `go run ./cmd/server` — так быстрее цикл правка → запуск.
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      # Учебные креды для локальной машины. Позже вынесем в .env (он в .gitignore).
+      POSTGRES_USER: moex
+      POSTGRES_PASSWORD: moex
+      POSTGRES_DB: moex
+    ports:
+      - "5432:5432"
+    volumes:
+      # ВАЖНО: с Postgres 18 том монтируется в /var/lib/postgresql,
+      # а не в /var/lib/postgresql/data, как в старых туториалах.
+      # Образ сам кладёт данные в подкаталог 18/docker — это упрощает
+      # будущие апгрейды мажорной версии через pg_upgrade.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # pg_isready отвечает "готов", только когда БД реально принимает соединения.
+      # Пригодится для depends_on: condition: service_healthy.
+      test: ["CMD-SHELL", "pg_isready -U moex -d moex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  # Именованный том: данные переживают `docker compose down`,
+  # удаляются только с флагом -v.
+  pgdata:

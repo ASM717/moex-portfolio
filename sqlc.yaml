@@ -1,0 +1,34 @@
+# Конфигурация sqlc: по SQL-запросам генерирует типобезопасный Go-код.
+# Запуск: go tool sqlc generate   (или go generate ./...)
+#
+# Java-параллель: ближе всего jOOQ / MyBatis Generator — SQL пишешь сам,
+# а мапперы в объекты генерируются. В отличие от JPA, никакого ORM и ленивой
+# загрузки: какой SQL написан, такой и выполнится. Ошибка в SQL (опечатка
+# в колонке, неверный тип) ловится на этапе генерации, а не в рантайме.
+version: "2"
+sql:
+  - engine: postgresql
+    # sqlc читает схему прямо из миграций goose и понимает их аннотации
+    # (секции Down игнорирует). Единый источник правды о схеме.
+    schema: migrations
+    queries: internal/db/queries
+    gen:
+      go:
+        package: db
+        out: internal/db
+        # Генерировать код под нативный pgx/v5, а не под database/sql.
+        sql_package: pgx/v5
+        # Общий интерфейс Querier не генерируем: по конвенции Go интерфейс
+        # объявляет потребитель (repository), и в нём только нужные ему методы.
+        emit_interface: false
+        # Пустой результат :many — пустой слайс [], а не nil (в JSON будет [] вместо null).
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          # Деньги: numeric -> shopspring/decimal (аналог BigDecimal).
+          - db_type: pg_catalog.numeric
+            go_type: github.com/shopspring/decimal.Decimal
+          # По умолчанию pgx-генерация даёт pgtype.Timestamptz; для NOT NULL
+          # колонок удобнее стандартный time.Time.
+          - db_type: timestamptz
+            go_type: time.Time
