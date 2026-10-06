@@ -20,7 +20,7 @@
 Нужен **Docker** с Compose. Одна команда поднимает PostgreSQL и сервис:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build      # или: make up
 ```
 
 Сервис слушает `http://localhost:8080`, миграции применяются при старте. Проверка:
@@ -45,8 +45,8 @@ curl localhost:8080/healthz
 Нужен **Go 1.26+**.
 
 ```bash
-docker compose up -d postgres     # только база
-go run ./cmd/server               # сервис с хоста
+docker compose up -d postgres     # только база      (make db)
+go run ./cmd/server               # сервис с хоста   (make run)
 ```
 
 Если перед этим был запущен весь стек, сначала остановите контейнер сервиса
@@ -274,6 +274,7 @@ internal/
   quote/             (план) фоновая загрузка котировок и история
 migrations/          SQL-миграции goose, встроены в бинарник
 examples/            готовые HTTP-запросы
+Makefile             частые команды: make help
 Dockerfile           многоэтапная сборка: golang → distroless (~20 МБ)
 docker-compose.yml   PostgreSQL + сервис
 ```
@@ -287,35 +288,33 @@ Go 1.26 · `net/http` (роутинг из стандартной библиот
 
 ## Разработка
 
-```bash
-# тесты (с детектором гонок)
-go test -race ./...
+Частые команды собраны в `Makefile`. `make` без аргументов покажет полный список.
 
-# статический анализ
-go vet ./...
-go run honnef.co/go/tools/cmd/staticcheck@latest ./...
-```
+| Команда                       | Что делает                                              |
+|-------------------------------|---------------------------------------------------------|
+| `make up` / `make down`       | Поднять / остановить всё в Docker                       |
+| `make db` + `make run`        | База в Docker, сервис с хоста                           |
+| `make logs`, `make psql`      | Логи сервиса, консоль PostgreSQL                        |
+| `make test` / `make test-race`| Тесты / тесты с детектором гонок                        |
+| `make cover`                  | Тесты с отчётом о покрытии                              |
+| `make fmt`                    | Отформатировать код                                     |
+| `make lint`                   | `go vet` + `staticcheck`                                |
+| `make generate`               | Сгенерировать код по SQL-запросам (sqlc)                |
+| `make migration name=<имя>`   | Создать заготовку миграции                              |
+| `make check`                  | Все проверки перед коммитом: формат, линтеры, тесты, актуальность sqlc-кода |
+
+Инструменты (`sqlc`, `staticcheck`) подключены как tool-зависимости в `go.mod`:
+их версии зафиксированы, отдельно ставить ничего не нужно.
 
 **SQL-запросы.** Запросы лежат в `internal/db/queries/*.sql`, Go-код по ним
-генерирует [sqlc](https://sqlc.dev). Он подключён как tool-зависимость модуля,
-отдельно ставить не нужно:
+генерирует [sqlc](https://sqlc.dev) (`make generate`). Сгенерированный код
+коммитится вместе с запросами; `make check` проверит, что он не устарел.
 
-```bash
-go generate ./...     # после изменения запросов или миграций
-```
-
-Сгенерированный код коммитится вместе с запросами.
-
-**Миграции.** Новая миграция — файл `migrations/0000N_<название>.sql`
-с секциями goose `Up` и `Down` (см. `00001_init.sql`). Создать заготовку:
-
-```bash
-go run github.com/pressly/goose/v3/cmd/goose@v3.28.0 -dir migrations -s create add_something sql
-```
-
-Миграции применяются при следующем запуске сервиса. Важно: goose разбирает
-любой SQL-комментарий, содержащий его аннотацию, поэтому в обычных
-комментариях миграций её писать нельзя.
+**Миграции.** `make migration name=add_something` создаст
+`migrations/0000N_add_something.sql` с секциями goose `Up` и `Down`
+(см. `00001_init.sql`). Миграции применяются при следующем запуске сервиса.
+Важно: goose разбирает любой SQL-комментарий, содержащий его аннотацию,
+поэтому в обычных комментариях миграций её писать нельзя.
 
 ## Ограничения и планы
 
