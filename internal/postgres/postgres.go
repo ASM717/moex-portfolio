@@ -14,6 +14,10 @@ import (
 	"fmt"
 	"time"
 
+	// Псевдоним импорта: имя пакета в модуле — decimal, но так оно
+	// конфликтовало бы с shopspring/decimal по смыслу; pgxdecimal понятнее.
+	pgxdecimal "github.com/jackc/pgx-shopspring-decimal"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +45,16 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg.MaxConns = 10
 	cfg.MinConns = 1
 	cfg.MaxConnIdleTime = 5 * time.Minute
+
+	// AfterConnect вызывается для каждого нового физического соединения.
+	// Регистрируем кодек numeric <-> decimal.Decimal: без него pgx не знает,
+	// как читать numeric в decimal напрямую. С кодеком значение передаётся
+	// точно, без промежуточного float64 (в Java JDBC сам отдаёт BigDecimal,
+	// здесь это подключается явно).
+	cfg.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		pgxdecimal.Register(conn.TypeMap())
+		return nil
+	}
 
 	// NewWithConfig не открывает соединения сразу (ленивое подключение),
 	// поэтому ошибка здесь — почти всегда ошибка конфигурации.

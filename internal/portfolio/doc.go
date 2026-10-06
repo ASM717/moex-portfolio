@@ -1,11 +1,16 @@
 // Package portfolio — портфели и позиции (тикер + количество),
 // расчёт текущей стоимости и доходности.
 //
-// Планируемая структура внутри пакета (по файлам, а не по подпакетам):
+// Структура внутри пакета (по файлам, а не по подпакетам):
 //
-//	handler.go    — HTTP-хендлеры (аналог @RestController)
-//	service.go    — бизнес-логика (аналог @Service)
-//	repository.go — доступ к PostgreSQL через sqlc (аналог Spring Data repository)
+//	portfolio.go  — доменные типы и ошибки (ErrNotFound, ValidationError)
+//	handler.go    — HTTP-хендлеры и JSON DTO (аналог @RestController)
+//	service.go    — бизнес-логика и валидация (аналог @Service)
+//	repository.go — доступ к PostgreSQL поверх sqlc-кода из internal/db
+//
+// Зависимости направлены строго сверху вниз: handler → service → repository.
+// Каждый слой видит нижний только через маленький интерфейс, объявленный
+// у себя (service и repository), поэтому слои тестируются по отдельности.
 //
 // Отличие от типичного Spring-проекта: там слои часто раскладывают по пакетам
 // controller/, service/, repository/. В Go принято группировать по фиче

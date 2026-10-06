@@ -26,6 +26,7 @@ import (
 	// Импорты своего модуля — по полному пути модуля из go.mod.
 	// Относительных импортов ("../internal/config") в Go нет.
 	"github.com/ASM717/moex-portfolio/internal/config"
+	"github.com/ASM717/moex-portfolio/internal/portfolio"
 	"github.com/ASM717/moex-portfolio/internal/postgres"
 	"github.com/ASM717/moex-portfolio/migrations"
 )
@@ -93,6 +94,13 @@ func run() error {
 	// и примерно соответствует @GetMapping("/portfolios/{id}").
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", handleHealth(pool))
+
+	// Ручная "сборка бинов": repository → service → handler.
+	// Каждый слой получает зависимость через конструктор; *Repository и
+	// *Service подходят под интерфейсы, объявленные в слое выше, неявно.
+	portfolioRepo := portfolio.NewRepository(pool)
+	portfolioSvc := portfolio.NewService(portfolioRepo)
+	portfolio.NewHandler(portfolioSvc).Register(mux)
 
 	// http.Server создаём явно, а не через http.ListenAndServe(addr, mux):
 	// у глобальной версии нет таймаутов, и медленный клиент может держать
