@@ -22,6 +22,12 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	// Импорты своего модуля — по полному пути модуля из go.mod.
+	// Относительных импортов ("../internal/config") в Go нет.
+	"github.com/ASM717/moex-portfolio/internal/config"
+	"github.com/ASM717/moex-portfolio/internal/postgres"
+	"github.com/ASM717/moex-portfolio/migrations"
 )
 
 // main в Go не возвращает код выхода и не принимает args (они в os.Args).
@@ -61,19 +67,39 @@ func run() error {
 	// Несколько defer-ов выполняются в обратном порядке (LIFO).
 	defer stop()
 
+	cfg := config.Load()
+
+	// --- Сборка зависимостей (composition root) ---
+	// Порядок как у Spring при старте: инфраструктура → миграции → бизнес-слой → web.
+	// Каждый шаг может упасть, и мы сразу выходим с понятной ошибкой.
+
+	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("connect to postgres: %w", err)
+	}
+	// defer сработает при любом выходе из run — и при ошибке ниже, и при штатной
+	// остановке. Т.к. defer-ы выполняются LIFO, пул закроется последним —
+	// уже после остановки HTTP-сервера, который им пользуется.
+	defer pool.Close()
+	slog.Info("connected to postgres")
+
+	if err := migrations.Up(ctx, pool); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+
 	// ServeMux — встроенный роутер. С Go 1.22 он понимает метод и
 	// параметры пути: "GET /portfolios/{id}" → r.PathValue("id").
 	// Это закрывает большую часть того, для чего раньше брали chi/gorilla,
 	// и примерно соответствует @GetMapping("/portfolios/{id}").
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.Handle("GET /healthz", handleHealth(pool))
 
 	// http.Server создаём явно, а не через http.ListenAndServe(addr, mux):
 	// у глобальной версии нет таймаутов, и медленный клиент может держать
 	// соединение бесконечно. В Tomcat эти таймауты настроены за тебя,
 	// в Go — ответственность твоя.
 	srv := &http.Server{
-		Addr:              ":8080",
+		Addr:              cfg.HTTPAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second, // time.Duration — типизированное число наносекунд
 		ReadTimeout:       10 * time.Second,
@@ -125,22 +151,58 @@ func run() error {
 	return nil
 }
 
-// handleHealth — простейший хендлер для проверки, что сервис жив.
+// pinger — всё, что нужно health-хендлеру от базы: уметь отвечать на Ping.
 //
-// Сигнатура (http.ResponseWriter, *http.Request) — стандарт для всех
-// хендлеров. Никаких аннотаций и возвращаемых ResponseEntity: статус и тело
-// пишутся напрямую в ResponseWriter. Порядок важен: сначала заголовки,
-// потом WriteHeader(статус), потом тело — после первой записи тела
-// заголовки менять уже поздно.
+// Ключевой нюанс Go: интерфейсы реализуются НЕЯВНО. *pgxpool.Pool нигде не
+// пишет "implements pinger" — у него просто есть метод Ping(ctx) error,
+// и этого достаточно (структурная типизация, "утиная" — но проверяется
+// компилятором). Поэтому интерфейс объявляет потребитель (здесь, рядом с
+// хендлером), а не поставщик (pgx), и в нём ровно те методы, что нужны.
+// В Java наоборот: интерфейс объявляет реализация, и он обычно "толстый".
 //
-// Функция с маленькой буквы — значит не экспортируется (видна только
-// внутри пакета). В Go это единственный модификатор доступа:
-// Заглавная = public, строчная = package-private.
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	// Ошибку записи игнорируем осознанно (`_ =`): клиент мог отвалиться,
-	// и сделать с этим уже ничего нельзя. Go требует явно показать,
-	// что ошибка проигнорирована, а не забыта.
-	_, _ = w.Write([]byte("ok"))
+// Бонус: в тесте вместо настоящей БД можно подсунуть любую структуру с
+// методом Ping — без Mockito.
+type pinger interface {
+	Ping(ctx context.Context) error
+}
+
+// handleHealth возвращает хендлер, проверяющий, что сервис жив и база доступна.
+//
+// Это функция, которая возвращает функцию (замыкание): возвращаемый хендлер
+// "захватывает" переменную db. Так в Go передают зависимости в хендлеры без
+// DI-контейнера — вместо @Autowired поля в контроллере. Когда хендлеров
+// станет много, их сгруппируют в структуру с полями-зависимостями
+// (почти как Spring-контроллер с конструктором).
+//
+// http.HandlerFunc — это тип-функция с сигнатурой (ResponseWriter, *Request),
+// у которого есть метод ServeHTTP, поэтому он удовлетворяет интерфейсу
+// http.Handler. Да, в Go методы можно объявлять даже у функциональных типов.
+func handleHealth(db pinger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// r.Context() отменится, если клиент оборвёт соединение. Дополнительно
+		// ограничиваем проверку двумя секундами, чтобы health-check не висел.
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		// Хендлер пишет ответ напрямую в ResponseWriter — никаких
+		// возвращаемых ResponseEntity. Порядок важен: сначала заголовки,
+		// потом WriteHeader(статус), потом тело — после первой записи тела
+		// заголовки менять уже поздно.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+		if err := db.Ping(ctx); err != nil {
+			// Детали ошибки — в лог, а не клиенту (там может быть адрес БД и т.п.).
+			// slog.ErrorContext берёт значения из контекста, если логгер их понимает.
+			slog.ErrorContext(ctx, "health check: database unavailable", "err", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("database unavailable"))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		// Ошибку записи игнорируем осознанно (`_ =`): клиент мог отвалиться,
+		// и сделать с этим уже ничего нельзя. Go требует явно показать,
+		// что ошибка проигнорирована, а не забыта.
+		_, _ = w.Write([]byte("ok"))
+	}
 }
